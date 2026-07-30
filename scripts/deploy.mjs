@@ -44,8 +44,12 @@ async function ensureD1(name) {
   const databases = await jsonCommand(["d1", "list"]);
   const existing = databases.find((database) => database.name === name);
   if (existing) return existing.uuid || existing.id || existing.database_id;
-  const created = await jsonCommand(["d1", "create", name]);
-  const id = created.uuid || created.id || created.database_id;
+  // Wrangler 4 supports JSON output for `d1 list`, but not for `d1 create`.
+  // Create in its normal human-readable form, then retrieve the ID from the
+  // authoritative JSON list rather than parsing terminal presentation text.
+  await run(["d1", "create", name]);
+  const created = (await jsonCommand(["d1", "list"])).find((database) => database.name === name);
+  const id = created?.uuid || created?.id || created?.database_id;
   if (!id) throw new Error("D1 database was created but its ID could not be determined.");
   return id;
 }
