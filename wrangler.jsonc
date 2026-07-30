@@ -3,6 +3,7 @@
   "name": "mail-score",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-30",
+  "keep_vars": true,
   "workers_dev": true,
   "preview_urls": false,
   "assets": {
@@ -11,50 +12,8 @@
     "run_worker_first": true
   },
   "vars": {
-    "APP_NAME": "邮件投递质量实验室",
-    "INBOUND_DOMAIN": "REPLACE_WITH_YOUR_EMAIL_ROUTING_DOMAIN"
+    "APP_NAME": "邮件投递质量实验室"
   },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "deliverability-lab",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "RAW_MAIL",
-      "bucket_name": "deliverability-lab-raw-mail"
-    }
-  ],
-  "queues": {
-    "producers": [
-      {
-        "binding": "ANALYZE_QUEUE",
-        "queue": "deliverability-lab-analyze"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "deliverability-lab-analyze",
-        "max_batch_size": 10,
-        "max_batch_timeout": 10,
-        "max_retries": 3
-      }
-    ]
-  },
-  "ratelimits": [
-    {
-      "name": "CREATE_LIMITER",
-      "namespace_id": "1001",
-      "simple": { "limit": 5, "period": 60 }
-    },
-    {
-      "name": "READ_LIMITER",
-      "namespace_id": "1002",
-      "simple": { "limit": 30, "period": 60 }
-    }
-  ],
   "triggers": {
     "crons": ["*/15 * * * *"]
   },

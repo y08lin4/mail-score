@@ -6,7 +6,7 @@ interface Env {
   CREATE_LIMITER: RateLimit;
   READ_LIMITER: RateLimit;
   APP_NAME?: string;
-  INBOUND_DOMAIN: string;
+  INBOUND_DOMAIN?: string;
   TOKEN_SECRET: string;
 }
 
@@ -64,7 +64,7 @@ export default {
   },
 
   async email(message, env): Promise<void> {
-    const domain = env.INBOUND_DOMAIN.trim().toLowerCase();
+    const domain = (env.INBOUND_DOMAIN || "").trim().toLowerCase();
     const recipient = splitMailbox(message.to);
     if (!recipient || recipient.domain !== domain || !recipient.local.startsWith("dl-")) {
       message.setReject("This recipient is not an active deliverability test address.");
@@ -125,7 +125,7 @@ async function createSession(request: Request, env: Env): Promise<Response> {
   const rate = await env.CREATE_LIMITER.limit({ key: clientKey(request) });
   if (!rate.success) return json({ success: false, message: "创建测试地址过于频繁，请稍后再试" }, 429);
 
-  const domain = env.INBOUND_DOMAIN.trim().toLowerCase();
+  const domain = (env.INBOUND_DOMAIN || "").trim().toLowerCase();
   if (!isDomain(domain) || domain.startsWith("replace_")) {
     return json({ success: false, message: "部署者尚未配置收信域名" }, 503);
   }

@@ -2,6 +2,8 @@
 
 独立的 Cloudflare Workers 项目：生成一次性收件地址，接收一封测试邮件，并在不调用 mail-tester 等报告 API 的前提下生成可解释的邮件质量报告。
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/y08lin4/mail-score)
+
 > 这不是“预测 Gmail 一定进收件箱”的服务。第一版只评估收到的邮件、其可见认证证据与结构质量；不会伪装成全球信誉数据库或真实进箱率。
 
 ## 当前检测项
@@ -39,42 +41,44 @@ Cloudflare Email Routing
   -> 仅可读取自己会话的报告
 ```
 
-## 部署前需要你操作的内容
+## 一键部署
 
-以下资源必须在**同一个 Cloudflare 账号**创建。不要把现有 SMTP 测试器的 Worker、R2 或 D1 直接复用给实验室。
+点击顶部 **Deploy to Cloudflare** 后，首次构建会自动创建并绑定：
 
-1. 选择收信域名。建议使用 `linyu.qzz.io`，并确认它没有承载你不想受影响的现有邮箱业务。
-2. 在该域名的 **Email → Email Routing** 中启用邮件路由；不要把本项目的 catch-all 转发到个人邮箱。
-3. 创建 D1 数据库：`deliverability-lab`。
-4. 创建 R2 Bucket：`deliverability-lab-raw-mail`。
-5. 创建 Queue：`deliverability-lab-analyze`。
-6. 用 `schema.sql` 初始化 D1。
-7. 把 D1 的 `database_id` 以及实际收信域名填入 `wrangler.jsonc`。
-8. 设置 `TOKEN_SECRET` 为至少 32 个随机字节的 Secret；它不能放进 `wrangler.jsonc` 或 Git。
-9. 部署本 Worker 后，在 Email Routing 中添加路由规则：把 `dl-*@你的域名`（若控制台不支持通配本地部分，则使用 catch-all）投递到此 Worker。
-10. 在 Worker 的 Settings 中设置一个仅用于实验室的 HTTP 自定义域名，例如 `deliverability-lab.linyu.qzz.io`。
+- Worker、静态实验页与 Cron 清理任务
+- D1 数据库（`<Worker 名称>-db`）及 `schema.sql` 表结构
+- R2 Bucket（`<Worker 名称>-raw-mail`）
+- Cloudflare Queue（`<Worker 名称>-analyze`）
+- 两个 Worker Rate Limit 绑定
+- 32 字节 `TOKEN_SECRET` Secret
 
-## 推荐命令
+重复部署会复用同名资源，不会重新生成报告签名 Secret。资源均创建在此次部署选择的 Cloudflare 账号中，不会触碰现有 SMTP 测试器的资源。
+
+### 仍需你确认的两步
+
+Cloudflare 不允许一键部署链接静默接管域名的入站邮件，因此以下是必须由域名所有者在控制台确认的安全操作：
+
+1. 在 Worker 的 **Settings → Variables and Secrets** 添加 `INBOUND_DOMAIN`，例如 `linyu.qzz.io`。
+2. 在该域名的 **Email → Email Routing** 添加规则，将测试地址 `dl-*@linyu.qzz.io` 路由到本 Worker。若控制台仅支持 catch-all，请先确认该域没有其它需要保留的收信业务。
+
+可选：在 Worker 的 **Settings → Domains & Routes** 绑定独立访问域，例如 `mail-score.linyu.qzz.io`。
+
+## 命令行部署
 
 ```powershell
-cd deliverability-lab
 npm install
-npx wrangler d1 create deliverability-lab
-npx wrangler r2 bucket create deliverability-lab-raw-mail
-npx wrangler queues create deliverability-lab-analyze
-npx wrangler d1 execute deliverability-lab --remote --file=./schema.sql
-npx wrangler secret put TOKEN_SECRET
-npm run typecheck
 npm run deploy
 ```
 
-部署前，先将 Wrangler 输出的 D1 ID 写入 `wrangler.jsonc`，并将：
+`npm run deploy` 与一键部署使用相同的自引导脚本，会自动创建缺失资源并初始化数据库。无需手动填写 D1 ID、R2 Bucket、Queue 或 Secret。
 
-```json
-"INBOUND_DOMAIN": "REPLACE_WITH_YOUR_EMAIL_ROUTING_DOMAIN"
+仅检查打包，不创建资源也不发布：
+
+```powershell
+npm install
+npm run typecheck
+npm run deploy -- --dry-run
 ```
-
-改成实际用于收信的域名，例如 `linyu.qzz.io`。
 
 ## 后续阶段
 
