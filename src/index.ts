@@ -22,6 +22,7 @@ interface Check {
 interface Report {
   version: 1;
   analyzedAt: string;
+  senderDomain: string | null;
   score: number;
   grade: string;
   summary: string;
@@ -152,6 +153,7 @@ function analyze(raw: string): Report {
   const auth = allHeaders(headers, "authentication-results").join(" ").toLowerCase();
   const dkim = firstHeader(headers, "dkim-signature");
   const contentType = firstHeader(headers, "content-type").toLowerCase();
+  const listUnsubscribe = firstHeader(headers, "list-unsubscribe");
   const received = allHeaders(headers, "received");
 
   add(checks, "dkim-signature", "authentication", "DKIM 签名结构", dkim && /\bd=[^;\s]+/i.test(dkim) && /\bs=[^;\s]+/i.test(dkim) ? "pass" : dkim ? "warning" : "fail", 12,
@@ -165,51 +167,64 @@ function analyze(raw: string): Report {
 
   const fromDomain = mailboxDomain(from);
   const returnDomain = mailboxDomain(returnPath);
-  add(checks, "from", "headers", "From 发件人", fromDomain ? "pass" : "fail", 6,
+  add(checks, "from", "headers", "From 发件人", fromDomain ? "pass" : "fail", 4,
     fromDomain ? `From 使用域名：${fromDomain}` : "From 缺失或格式无法识别。", "使用可正常接收回复的标准 From 地址。");
   const aligned = fromDomain && returnDomain && relatedDomain(fromDomain, returnDomain);
-  add(checks, "return-path", "headers", "Return-Path 与 From 一致性", aligned ? "pass" : returnPath ? "warning" : "warning", 5,
+  add(checks, "return-path", "headers", "Return-Path 与 From 一致性", aligned ? "pass" : returnPath ? "warning" : "warning", 4,
     returnPath ? (aligned ? "Return-Path 与 From 域名一致或同属一个组织域。" : "Return-Path 与 From 域名不一致。") : "邮件头未提供 Return-Path。", "营销或事务邮件应让信封发件域与 From 域保持可解释的一致关系。");
   const replyDomain = mailboxDomain(replyTo);
-  add(checks, "reply-to", "headers", "Reply-To 可解释性", !replyTo || (fromDomain && replyDomain && relatedDomain(fromDomain, replyDomain)) ? "pass" : "warning", 3,
+  add(checks, "reply-to", "headers", "Reply-To 可解释性", !replyTo || (fromDomain && replyDomain && relatedDomain(fromDomain, replyDomain)) ? "pass" : "warning", 2,
     replyTo ? `Reply-To 使用域名：${replyDomain || "无法识别"}` : "未设置 Reply-To（通常是正常的）。", "如设置 Reply-To，应避免把用户无提示地引导到无关域名。");
   const date = firstHeader(headers, "date");
   const dateValue = Date.parse(date);
-  add(checks, "date", "headers", "Date 时间", Number.isFinite(dateValue) ? Math.abs(Date.now() - dateValue) > 7 * 86400000 ? "warning" : "pass" : "fail", 4,
+  add(checks, "date", "headers", "Date 时间", Number.isFinite(dateValue) ? Math.abs(Date.now() - dateValue) > 7 * 86400000 ? "warning" : "pass" : "fail", 3,
     Number.isFinite(dateValue) ? `Date：${date}` : "Date 缺失或无法解析。", "由发送程序生成正确的 RFC 5322 Date 头，避免明显偏差。");
   const messageId = firstHeader(headers, "message-id");
-  add(checks, "message-id", "headers", "Message-ID", /<[^<>\s]+@[^<>\s]+>/.test(messageId) ? "pass" : "warning", 4,
+  add(checks, "message-id", "headers", "Message-ID", /<[^<>\s]+@[^<>\s]+>/.test(messageId) ? "pass" : "warning", 3,
     messageId ? `Message-ID：${short(messageId, 120)}` : "未检测到 Message-ID。", "为每封邮件生成唯一且格式正确的 Message-ID。");
-  add(checks, "subject", "headers", "Subject 主题", firstHeader(headers, "subject").trim() ? "pass" : "warning", 3,
+  const messageIdDomain = mailboxDomain(messageId);
+  add(checks, "message-id-domain", "headers", "Message-ID 域名一致性", !messageIdDomain || !fromDomain ? "warning" : relatedDomain(messageIdDomain, fromDomain) ? "pass" : "warning", 2,
+    messageIdDomain && fromDomain ? (relatedDomain(messageIdDomain, fromDomain) ? "Message-ID 域名与 From 域一致或同属一个组织域。" : "Message-ID 域名与 From 域不一致。") : "无法同时识别 Message-ID 与 From 域名。", "建议让 Message-ID 使用受控发件域，方便追踪与信誉归因。");
+  add(checks, "subject", "headers", "Subject 主题", firstHeader(headers, "subject").trim() ? "pass" : "warning", 2,
     firstHeader(headers, "subject").trim() ? "主题存在。" : "主题为空。", "为收件人提供具体、可理解的主题。");
 
-  const hasPlain = /text\/plain/i.test(contentType) || (!/multipart\//i.test(contentType) && body.trim().length > 0);
-  add(checks, "plain-text", "content", "纯文本版本", hasPlain ? "pass" : "warning", 8,
+  const hasPlain = /text\/plain/i.test(raw) || (!/multipart\//i.test(contentType) && body.trim().length > 0);
+  add(checks, "plain-text", "content", "纯文本版本", hasPlain ? "pass" : "warning", 7,
     hasPlain ? "检测到纯文本正文或单段文本消息。" : "未检测到明确的 text/plain 版本。", "HTML 邮件应同时提供可读的纯文本 MIME 部分。");
-  const hasHTML = /text\/html/i.test(contentType) || /<html[\s>]|<body[\s>]|<table[\s>]/i.test(body);
+  const hasHTML = /text\/html/i.test(raw) || /<html[\s>]|<body[\s>]|<table[\s>]/i.test(body);
   const activeHTML = /<script\b|<form\b|javascript:/i.test(body);
   const remoteImages = (body.match(/<img\b[^>]+\bsrc=["']https?:\/\//gi) || []).length;
-  add(checks, "html-safety", "content", "HTML 结构与活跃内容", activeHTML ? "fail" : hasHTML && remoteImages > 8 ? "warning" : "pass", 7,
+  add(checks, "html-safety", "content", "HTML 结构与活跃内容", activeHTML ? "fail" : hasHTML && remoteImages > 8 ? "warning" : "pass", 9,
     activeHTML ? "HTML 中含有 script、form 或 javascript: 内容。" : hasHTML ? `HTML 正文存在；远程图片数量：${remoteImages}。` : "邮件未使用 HTML 正文。", "不要在邮件中加入脚本、表单或可执行内容；控制远程图片数量。");
+  const multipartAlternative = /multipart\/alternative/i.test(raw);
+  add(checks, "multipart-alternative", "content", "纯文本与 HTML 双版本", hasPlain && hasHTML && multipartAlternative ? "pass" : "warning", 4,
+    hasPlain && hasHTML ? (multipartAlternative ? "检测到 multipart/alternative，包含纯文本与 HTML 回退版本。" : "检测到两类正文，但未识别 multipart/alternative 结构。") : "未同时检测到纯文本与 HTML 正文。", "面向大多数业务邮件，建议使用 multipart/alternative 同时提供 text/plain 与 text/html。");
   const links = extractLinks(body);
   const suspiciousLinks = links.filter((link) => /^http:\/\//i.test(link) || /https?:\/\/\d{1,3}(?:\.\d{1,3}){3}/.test(link) || /xn--/i.test(link));
-  add(checks, "links", "content", "链接卫生", suspiciousLinks.length ? "warning" : links.length > 16 ? "warning" : "pass", 6,
+  add(checks, "links", "content", "链接卫生", suspiciousLinks.length ? "warning" : links.length > 16 ? "warning" : "pass", 5,
     `共检测到 ${links.length} 个 URL；高风险格式 ${suspiciousLinks.length} 个。`, "优先使用 HTTPS、自有域名和清晰链接；避免裸 IP、Punycode 与过量链接。");
   const attachmentRisk = /content-disposition:\s*attachment|filename\*?=/i.test(raw) && /\.(?:exe|js|vbs|scr|bat|cmd|jar|msi)(?:["';\s]|$)/i.test(raw);
   const hasAttachment = /content-disposition:\s*attachment|filename\*?=/i.test(raw);
-  add(checks, "attachments", "content", "附件风险", attachmentRisk ? "fail" : hasAttachment ? "warning" : "pass", 4,
+  add(checks, "attachments", "content", "附件风险", attachmentRisk ? "fail" : hasAttachment ? "warning" : "pass", 3,
     attachmentRisk ? "检测到高风险可执行附件扩展名。" : hasAttachment ? "检测到附件；报告不会执行或打开附件。" : "未检测到附件。", "避免可执行附件；必要文件宜使用受控下载链接并说明用途。");
+  const unsubscribeMethod = /<mailto:[^>]+>/i.test(listUnsubscribe) || /<https:\/\/[^>]+>/i.test(listUnsubscribe);
+  add(checks, "list-unsubscribe", "content", "退订机制（群发推荐）", unsubscribeMethod ? "pass" : "warning", 2,
+    unsubscribeMethod ? "检测到可用的 List-Unsubscribe 邮件头。" : "未检测到 List-Unsubscribe；事务邮件通常不需要，群发或订阅邮件建议提供。", "营销、订阅或批量通知邮件应提供 List-Unsubscribe，并确保退订请求可被实际处理。");
 
-  add(checks, "received-trace", "transport", "Received 传输链", received.length ? "pass" : "warning", 10,
+  add(checks, "received-trace", "transport", "Received 传输链", received.length ? "pass" : "warning", 8,
     received.length ? `检测到 ${received.length} 条 Received 记录。` : "未检测到 Received 记录。", "保留完整的传输头，便于诊断中继与 TLS 路径。");
   const hasMimeVersion = Boolean(firstHeader(headers, "mime-version"));
-  add(checks, "mime-version", "transport", "MIME 声明", hasMimeVersion ? "pass" : hasHTML || hasAttachment ? "warning" : "pass", 5,
+  add(checks, "mime-version", "transport", "MIME 声明", hasMimeVersion ? "pass" : hasHTML || hasAttachment ? "warning" : "pass", 4,
     hasMimeVersion ? "检测到 MIME-Version 头。" : "未检测到 MIME-Version 头。", "含多部分、HTML 或附件的邮件应明确声明 MIME-Version: 1.0。");
+  const transferEncoding = firstHeader(headers, "content-transfer-encoding");
+  add(checks, "transfer-encoding", "transport", "正文传输编码", transferEncoding || (!hasHTML && !hasAttachment) ? "pass" : "warning", 3,
+    transferEncoding ? `Content-Transfer-Encoding：${short(transferEncoding, 80)}。` : "未检测到 Content-Transfer-Encoding。", "含 HTML、非 ASCII 文本或附件的邮件应声明合适的 Content-Transfer-Encoding，避免乱码与传输损坏。");
 
   const score = Math.max(0, Math.min(100, checks.reduce((total, check) => total + check.points, 0)));
   return {
     version: 1,
     analyzedAt: new Date().toISOString(),
+    senderDomain: fromDomain,
     score,
     grade: score >= 90 ? "配置良好" : score >= 70 ? "可投递，建议优化" : score >= 45 ? "存在明显风险" : "需要先修复基础配置",
     summary: `完成 ${checks.length} 项离线检测，其中 ${checks.filter((check) => check.status === "fail").length} 项失败、${checks.filter((check) => check.status === "warning").length} 项需要关注。`,
