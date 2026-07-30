@@ -36,6 +36,7 @@ interface SessionRow {
   status: string;
   received_at: number | null;
   analyzed_at: number | null;
+  envelope_from: string | null;
   report_json: string | null;
 }
 
@@ -129,11 +130,12 @@ async function readSession(request: Request, env: Env): Promise<Response> {
   if (!auth) return json({ success: false, message: "报告令牌无效或已过期" }, 403);
 
   const session = await env.DB.prepare(
-    "SELECT id, expires_at, status, received_at, analyzed_at, report_json FROM sessions WHERE id = ? LIMIT 1",
+    "SELECT id, expires_at, status, received_at, analyzed_at, envelope_from, report_json FROM sessions WHERE id = ? LIMIT 1",
   ).bind(auth.id).first<SessionRow>();
   if (!session) return json({ success: false, message: "检测会话不存在或已被清理" }, 404);
   let report: Report | null = null;
   try { report = session.report_json ? JSON.parse(session.report_json) as Report : null; } catch { /* corrupt rows are surfaced as pending */ }
+  if (report && !report.senderDomain) report.senderDomain = mailboxDomain(session.envelope_from || "");
   return json({
     success: true,
     status: session.status,
@@ -170,8 +172,8 @@ function analyze(raw: string): Report {
   add(checks, "from", "headers", "From 发件人", fromDomain ? "pass" : "fail", 4,
     fromDomain ? `From 使用域名：${fromDomain}` : "From 缺失或格式无法识别。", "使用可正常接收回复的标准 From 地址。");
   const aligned = fromDomain && returnDomain && relatedDomain(fromDomain, returnDomain);
-  add(checks, "return-path", "headers", "Return-Path 与 From 一致性", aligned ? "pass" : returnPath ? "warning" : "warning", 4,
-    returnPath ? (aligned ? "Return-Path 与 From 域名一致或同属一个组织域。" : "Return-Path 与 From 域名不一致。") : "邮件头未提供 Return-Path。", "营销或事务邮件应让信封发件域与 From 域保持可解释的一致关系。");
+  add(checks, "return-path", "headers", "Return-Path 与 From 一致性", aligned ? "pass" : returnPath ? "warning" : "pass", 4,
+    returnPath ? (aligned ? "Return-Path 与 From 域名一致或同属一个组织域。" : "Return-Path 与 From 域名不一致。") : "收信链路未提供 Return-Path；该字段通常由最终投递的 MTA 写入，本次不扣分。", "如收信链路保留 Return-Path，营销或事务邮件应让信封发件域与 From 域保持可解释的一致关系。");
   const replyDomain = mailboxDomain(replyTo);
   add(checks, "reply-to", "headers", "Reply-To 可解释性", !replyTo || (fromDomain && replyDomain && relatedDomain(fromDomain, replyDomain)) ? "pass" : "warning", 2,
     replyTo ? `Reply-To 使用域名：${replyDomain || "无法识别"}` : "未设置 Reply-To（通常是正常的）。", "如设置 Reply-To，应避免把用户无提示地引导到无关域名。");
@@ -208,8 +210,8 @@ function analyze(raw: string): Report {
   add(checks, "attachments", "content", "附件风险", attachmentRisk ? "fail" : hasAttachment ? "warning" : "pass", 3,
     attachmentRisk ? "检测到高风险可执行附件扩展名。" : hasAttachment ? "检测到附件；报告不会执行或打开附件。" : "未检测到附件。", "避免可执行附件；必要文件宜使用受控下载链接并说明用途。");
   const unsubscribeMethod = /<mailto:[^>]+>/i.test(listUnsubscribe) || /<https:\/\/[^>]+>/i.test(listUnsubscribe);
-  add(checks, "list-unsubscribe", "content", "退订机制（群发推荐）", unsubscribeMethod ? "pass" : "warning", 2,
-    unsubscribeMethod ? "检测到可用的 List-Unsubscribe 邮件头。" : "未检测到 List-Unsubscribe；事务邮件通常不需要，群发或订阅邮件建议提供。", "营销、订阅或批量通知邮件应提供 List-Unsubscribe，并确保退订请求可被实际处理。");
+  add(checks, "list-unsubscribe", "content", "退订机制（群发推荐）", "pass", 2,
+    unsubscribeMethod ? "检测到可用的 List-Unsubscribe 邮件头。" : "未检测到 List-Unsubscribe；普通事务或连通性测试不扣分，群发或订阅邮件建议提供。", "营销、订阅或批量通知邮件应提供 List-Unsubscribe，并确保退订请求可被实际处理。");
 
   add(checks, "received-trace", "transport", "Received 传输链", received.length ? "pass" : "warning", 8,
     received.length ? `检测到 ${received.length} 条 Received 记录。` : "未检测到 Received 记录。", "保留完整的传输头，便于诊断中继与 TLS 路径。");
