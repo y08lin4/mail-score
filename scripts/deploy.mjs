@@ -31,15 +31,6 @@ async function jsonCommand(args) {
   return parseJSON(await run([...args, "--json"]));
 }
 
-async function createIfMissing(args) {
-  try {
-    await run(args);
-  } catch (error) {
-    const message = String(error).toLowerCase();
-    if (!message.includes("already exists") && !message.includes("already taken")) throw error;
-  }
-}
-
 async function ensureD1(name) {
   const databases = await jsonCommand(["d1", "list"]);
   const existing = databases.find((database) => database.name === name);
@@ -68,24 +59,11 @@ if (process.argv.includes("--dry-run")) {
 
 const workerName = base.name;
 const d1Name = `${workerName}-db`;
-const bucketName = `${workerName}-raw-mail`;
-const queueName = `${workerName}-analyze`;
 const databaseId = await ensureD1(d1Name);
-await createIfMissing(["r2", "bucket", "create", bucketName]);
-await createIfMissing(["queues", "create", queueName]);
 
 const generated = {
   ...base,
   d1_databases: [{ binding: "DB", database_name: d1Name, database_id: databaseId }],
-  r2_buckets: [{ binding: "RAW_MAIL", bucket_name: bucketName }],
-  queues: {
-    producers: [{ binding: "ANALYZE_QUEUE", queue: queueName }],
-    consumers: [{ queue: queueName, max_batch_size: 10, max_batch_timeout: 10, max_retries: 3 }],
-  },
-  ratelimits: [
-    { name: "CREATE_LIMITER", namespace_id: "1001", simple: { limit: 5, period: 60 } },
-    { name: "READ_LIMITER", namespace_id: "1002", simple: { limit: 30, period: 60 } },
-  ],
 };
 await writeFile(generatedConfigPath, `${JSON.stringify(generated, null, 2)}\n`);
 await run(["deploy", "--config", ".wrangler.generated.jsonc"]);

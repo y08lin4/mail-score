@@ -14,7 +14,7 @@
 | 邮件头 | From、Return-Path 对齐、Reply-To、Date、Message-ID、Subject |
 | 正文 | 纯文本版本、HTML 活跃内容、远程图片数量、URL 数量、HTTP/IP/Punycode URL、附件与高风险扩展名 |
 | 传输 | Received 链、MIME-Version |
-| 安全 | 96 位随机收件地址、30 分钟时效、单封限制、签名报告令牌、按来源限流、5 MiB 原始邮件上限、未知地址拒收、短期保存与定时清理 |
+| 安全 | 96 位随机收件地址、30 分钟时效、单封限制、签名报告令牌、按来源限流、1 MiB 分析上限、未知地址拒收、短期保存与定时清理 |
 
 ### 明确不做的事
 
@@ -33,9 +33,8 @@
 Cloudflare Email Routing
   -> Email Worker 收到邮件
   -> 验证地址、拒绝未知/过期/重复邮件
-  -> R2 保存原始 RFC 822 邮件
-  -> Queue 触发异步解析
-  -> D1 保存脱敏后的结构化报告
+  -> 在 Email Worker 内一次性解析（不保存原始邮件）
+  -> D1 保存脱敏后的结构化报告与限流计数
 
 浏览器 GET /api/sessions?token=...
   -> 仅可读取自己会话的报告
@@ -47,9 +46,6 @@ Cloudflare Email Routing
 
 - Worker、静态实验页与 Cron 清理任务
 - D1 数据库（`<Worker 名称>-db`）及 `schema.sql` 表结构
-- R2 Bucket（`<Worker 名称>-raw-mail`）
-- Cloudflare Queue（`<Worker 名称>-analyze`）
-- 两个 Worker Rate Limit 绑定
 - 32 字节 `TOKEN_SECRET` Secret
 
 重复部署会复用同名资源，不会重新生成报告签名 Secret。资源均创建在此次部署选择的 Cloudflare 账号中，不会触碰现有 SMTP 测试器的资源。
@@ -70,7 +66,22 @@ npm install
 npm run deploy
 ```
 
-`npm run deploy` 与一键部署使用相同的自引导脚本，会自动创建缺失资源并初始化数据库。无需手动填写 D1 ID、R2 Bucket、Queue 或 Secret。
+`npm run deploy` 与一键部署使用相同的自引导脚本，会自动创建缺失资源并初始化数据库。无需手动填写 D1 ID 或 Secret，也不需要启用 R2、Queues 或额外的 Rate Limit 绑定。
+
+## API（可选）
+
+提供一个小范围、可版本化的检测 API，适合在自有后台或 CI 中创建一次性收件地址并轮询报告；它不是批量发信、邮件转发或任意 EML 上传接口。
+
+1. `POST /api/v1/sessions`：创建一个 30 分钟有效、仅能接收一封邮件的地址。响应中返回 `address`、`token` 与 `expiresAt`。
+2. 将要检测的邮件发送到 `address`。
+3. `GET /api/v1/sessions?token=<token>`：轮询 `waiting`、`complete` 或 `failed` 状态；完成时返回 `report`。
+
+```bash
+curl -X POST https://你的-worker.workers.dev/api/v1/sessions
+curl "https://你的-worker.workers.dev/api/v1/sessions?token=上一步的token"
+```
+
+创建和读取均按来源限流。`token` 等同于该次报告的临时访问凭证，请只在受信任的服务端保存；第三方网页浏览器跨域调用会被拒绝。
 
 仅检查打包，不创建资源也不发布：
 
@@ -89,4 +100,4 @@ npm run deploy -- --dry-run
 
 ## 数据保留
 
-会话过期后，定时任务会删除对应 R2 原始邮件和 D1 报告。请仍然假定测试邮件可能包含敏感内容：不要发送密码、授权码、个人证件、客户数据或真实附件。
+原始邮件只在 Email Worker 内存中完成一次解析，不写入 R2 或 D1；会话过期后，定时任务会删除 D1 报告与匿名化限流计数。请仍然不要发送密码、授权码、个人证件、客户数据或真实附件。

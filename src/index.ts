@@ -1,18 +1,9 @@
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
-  RAW_MAIL: R2Bucket;
-  ANALYZE_QUEUE: Queue<AnalyzeJob>;
-  CREATE_LIMITER: RateLimit;
-  READ_LIMITER: RateLimit;
   APP_NAME?: string;
   INBOUND_DOMAIN?: string;
   TOKEN_SECRET: string;
-}
-
-interface AnalyzeJob {
-  sessionId: string;
-  objectKey: string;
 }
 
 type CheckStatus = "pass" | "warning" | "fail" | "info";
@@ -48,15 +39,15 @@ interface SessionRow {
 }
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
-const MAX_RAW_BYTES = 5 * 1024 * 1024;
+const MAX_RAW_BYTES = 1024 * 1024;
 const encoder = new TextEncoder();
 
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/api/health") return json({ ok: true, service: "deliverability-lab" });
-    if (url.pathname === "/api/sessions" && request.method === "POST") return createSession(request, env);
-    if (url.pathname === "/api/sessions" && request.method === "GET") return readSession(request, env);
+    if ((url.pathname === "/api/sessions" || url.pathname === "/api/v1/sessions") && request.method === "POST") return createSession(request, env);
+    if ((url.pathname === "/api/sessions" || url.pathname === "/api/v1/sessions") && request.method === "GET") return readSession(request, env);
     if (url.pathname.startsWith("/api/")) return json({ success: false, message: "接口不存在" }, 404);
 
     const response = await env.ASSETS.fetch(request);
@@ -71,7 +62,7 @@ export default {
       return;
     }
     if (message.rawSize > MAX_RAW_BYTES) {
-      message.setReject("Message exceeds the 5 MiB analysis limit.");
+      message.setReject("Message exceeds the 1 MiB analysis limit.");
       return;
     }
 
@@ -84,46 +75,30 @@ export default {
       return;
     }
 
-    const objectKey = `mail/${session.id}/${crypto.randomUUID()}.eml`;
     try {
-      await env.RAW_MAIL.put(objectKey, message.raw, {
-        httpMetadata: { contentType: "message/rfc822" },
-        customMetadata: { sessionId: session.id, receivedAt: String(Date.now()) },
-      });
+      // Do not persist raw email. It is parsed once in the Email Worker and
+      // only the derived report is retained in D1 until the session expires.
+      const report = analyze(await new Response(message.raw).text());
+      const receivedAt = Date.now();
       await env.DB.prepare(
-        "UPDATE sessions SET status = 'received', received_at = ?, object_key = ?, envelope_from = ? WHERE id = ? AND status = 'waiting'",
-      ).bind(Date.now(), objectKey, message.from.slice(0, 320), session.id).run();
-      await env.ANALYZE_QUEUE.send({ sessionId: session.id, objectKey });
+        "UPDATE sessions SET status = 'complete', received_at = ?, analyzed_at = ?, report_json = ?, envelope_from = ? WHERE id = ? AND status = 'waiting'",
+      ).bind(receivedAt, receivedAt, JSON.stringify(report), message.from.slice(0, 320), session.id).run();
     } catch {
       await env.DB.prepare("UPDATE sessions SET status = 'failed' WHERE id = ?").bind(session.id).run();
       message.setReject("The analysis service could not accept this message. Please try again later.");
     }
   },
 
-  async queue(batch, env): Promise<void> {
-    for (const item of batch.messages) {
-      try {
-        await analyzeMail(item.body, env);
-        item.ack();
-      } catch {
-        item.retry({ delaySeconds: 30 });
-      }
-    }
-  },
-
   async scheduled(_event, env): Promise<void> {
-    const expired = await env.DB.prepare(
-      "SELECT id, object_key FROM sessions WHERE expires_at < ? LIMIT 100",
-    ).bind(Date.now()).all<{ id: string; object_key: string | null }>();
-    for (const row of expired.results) if (row.object_key) await env.RAW_MAIL.delete(row.object_key);
-    if (expired.results.length) await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(Date.now()).run();
+    const now = Date.now();
+    await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now).run();
+    await env.DB.prepare("DELETE FROM rate_windows WHERE window_start < ?").bind(now - 60 * 60 * 1000).run();
   },
-} satisfies ExportedHandler<Env, AnalyzeJob>;
+} satisfies ExportedHandler<Env>;
 
 async function createSession(request: Request, env: Env): Promise<Response> {
   if (!validOrigin(request)) return json({ success: false, message: "请求来源不受信任" }, 403);
-  const rate = await env.CREATE_LIMITER.limit({ key: clientKey(request) });
-  if (!rate.success) return json({ success: false, message: "创建测试地址过于频繁，请稍后再试" }, 429);
+  if (!await allowRequest(env, "create", clientKey(request), 5, 60_000)) return json({ success: false, message: "创建测试地址过于频繁，请稍后再试" }, 429);
 
   const domain = (env.INBOUND_DOMAIN || "").trim().toLowerCase();
   if (!isDomain(domain) || domain.startsWith("replace_")) {
@@ -147,8 +122,7 @@ async function createSession(request: Request, env: Env): Promise<Response> {
 
 async function readSession(request: Request, env: Env): Promise<Response> {
   if (!validOrigin(request)) return json({ success: false, message: "请求来源不受信任" }, 403);
-  const rate = await env.READ_LIMITER.limit({ key: clientKey(request) });
-  if (!rate.success) return json({ success: false, message: "查询过于频繁，请稍后再试" }, 429);
+  if (!await allowRequest(env, "read", clientKey(request), 30, 60_000)) return json({ success: false, message: "查询过于频繁，请稍后再试" }, 429);
   const token = new URL(request.url).searchParams.get("token") || "";
   const auth = await verifyToken(token, env.TOKEN_SECRET);
   if (!auth) return json({ success: false, message: "报告令牌无效或已过期" }, 403);
@@ -167,16 +141,6 @@ async function readSession(request: Request, env: Env): Promise<Response> {
     analyzedAt: session.analyzed_at ? new Date(session.analyzed_at).toISOString() : null,
     report,
   });
-}
-
-async function analyzeMail(job: AnalyzeJob, env: Env): Promise<void> {
-  const object = await env.RAW_MAIL.get(job.objectKey);
-  if (!object) throw new Error("raw message not found");
-  const raw = await object.text();
-  const report = analyze(raw);
-  await env.DB.prepare(
-    "UPDATE sessions SET status = 'complete', analyzed_at = ?, report_json = ? WHERE id = ?",
-  ).bind(Date.now(), JSON.stringify(report), job.sessionId).run();
 }
 
 function analyze(raw: string): Report {
@@ -301,6 +265,14 @@ function relatedDomain(left: string, right: string): boolean { return left === r
 function splitMailbox(value: string): { local: string; domain: string } | null { const match = /^([^@\s]+)@([^@\s]+)$/i.exec(value.trim()); return match ? { local: match[1].toLowerCase(), domain: match[2].toLowerCase() } : null; }
 function isDomain(value: string): boolean { return value.length <= 253 && value.split(".").length >= 2 && value.split(".").every((label) => /^(?!-)[a-z0-9-]{1,63}(?<!-)$/i.test(label)); }
 function clientKey(request: Request): string { return request.headers.get("CF-Connecting-IP") || "anonymous"; }
+async function allowRequest(env: Env, scope: string, client: string, limit: number, windowMs: number): Promise<boolean> {
+  const windowStart = Math.floor(Date.now() / windowMs) * windowMs;
+  const key = `${scope}:${await sha256(client)}`;
+  const row = await env.DB.prepare(
+    "INSERT INTO rate_windows (key, window_start, count) VALUES (?, ?, 1) ON CONFLICT(key, window_start) DO UPDATE SET count = count + 1 RETURNING count",
+  ).bind(key, windowStart).first<{ count: number }>();
+  return (row?.count || limit + 1) <= limit;
+}
 function validOrigin(request: Request): boolean { const origin = request.headers.get("origin"); return !origin || origin === new URL(request.url).origin; }
 
 function randomHex(bytes: number): string { const data = crypto.getRandomValues(new Uint8Array(bytes)); return Array.from(data, (byte) => byte.toString(16).padStart(2, "0")).join(""); }
