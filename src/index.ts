@@ -51,7 +51,7 @@ export default {
     if (url.pathname.startsWith("/api/")) return json({ success: false, message: "接口不存在" }, 404);
 
     const response = await env.ASSETS.fetch(request);
-    return securityHeaders(response, true);
+    return securityHeaders(response);
   },
 
   async email(message, env): Promise<void> {
@@ -282,5 +282,5 @@ async function verifyToken(token: string, secret: string): Promise<{ id: string;
 async function hmac(payload: string, secret: string): Promise<string> { const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]); const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload)); return base64URL(new Uint8Array(signature)); }
 function base64URL(bytes: Uint8Array): string { let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
 function timingSafeEqual(left: string, right: string): boolean { if (left.length !== right.length) return false; let difference = 0; for (let i = 0; i < left.length; i += 1) difference |= left.charCodeAt(i) ^ right.charCodeAt(i); return difference === 0; }
-function json(payload: unknown, status = 200): Response { return securityHeaders(new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" } })); }
+function json(payload: unknown, status = 200): Response { return securityHeaders(new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" } }), true); }
 function securityHeaders(response: Response, noIndex = false): Response { const headers = new Headers(response.headers); headers.set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"); headers.set("Referrer-Policy", "no-referrer"); headers.set("X-Content-Type-Options", "nosniff"); headers.set("X-Frame-Options", "DENY"); headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()"); if (noIndex) headers.set("X-Robots-Tag", "noindex, nofollow, noarchive"); return new Response(response.body, { status: response.status, statusText: response.statusText, headers }); }
