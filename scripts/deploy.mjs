@@ -46,7 +46,9 @@ async function ensureD1(name) {
 }
 
 async function ensureSecret() {
-  const secrets = await jsonCommand(["secret", "list"]);
+  // `secret list` uses `--format json` rather than the generic `--json`
+  // option in Wrangler 4.
+  const secrets = parseJSON(await run(["secret", "list", "--format", "json"]));
   if (secrets.some((secret) => secret.name === "TOKEN_SECRET")) return;
   await run(["secret", "put", "TOKEN_SECRET"], randomBytes(32).toString("base64url"));
 }
